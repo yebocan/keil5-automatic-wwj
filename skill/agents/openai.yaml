@@ -1,0 +1,4 @@
+interface:
+  display_name: "Keil5 Automatic WWJ"
+  short_description: "编译 STM32/ARM 工程并做源码级调试：解析编译错误、远程控制 uVision 仿真或硬件调试（断点、单步、读变量/寄存器/内存）。零 Python 依赖。"
+  default_prompt: "用 $keil5-automatic-wwj 帮我编译并调试这个 Keil 工程："

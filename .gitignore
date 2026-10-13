@@ -1,0 +1,33 @@
+# 自检与构建产物（脚本自己生成，不进仓库）
+skill-tests*/
+keil5-skill-tests/
+launch_*/
+result.json
+
+# Keil 编译中间产物
+Objects/
+Listings/
+*.o
+*.crf
+*.d
+*.dep
+*.axf
+*.hex
+*.lnp
+*.sct
+*.htm
+*.build_log.htm
+*.map
+*.lst
+*.uvoptx
+*.uvguix.*
+build.log
+prebuild.log
+uv4_*.log
+
+# 系统与编辑器
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
