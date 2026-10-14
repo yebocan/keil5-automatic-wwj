@@ -270,8 +270,8 @@ if ($Test -in @('all', 'debug')) {
         # 只清理本脚本启动的那一个进程：核对 PID + 进程名 UV4 + 启动时间，
         # 先让它自己退出（UVSOCK exit → 关主窗口），都失败才强杀这一个 PID。
         if ($ownedPid -and -not $KeepUvision) {
-            $cleanup = Stop-OwnedUvision -ProcessId $ownedPid -StartedAt $ownedStart -Port $actualPort -ClientExe $clientExe
-            Write-Output ("[INFO] cleanup - " + $cleanup.message)
+            $cleanup = Stop-OwnedUvision -ProcessId $ownedPid -OwnerPid $PID -StartedAt $ownedStart -Port $actualPort -ClientExe $clientExe
+            Write-Output ("[INFO] cleanup - " + $cleanup.message + " (owner 校验: " + $cleanup.ownerCheck + ")")
             if ($cleanup.attempted -and -not (Get-Process -Id $ownedPid -ErrorAction SilentlyContinue)) {
                 Remove-KeilOwnedRegistryEntry -ProcessId $ownedPid
             }
@@ -320,7 +320,21 @@ if ($Test -in @('all', 'debug')) {
             $staleIds = (@($stale | ForEach-Object { $_.pid }) -join ',')
             if ($CleanStaleUvision) {
                 foreach ($s in $stale) {
-                    $c = Stop-OwnedUvision -ProcessId $s.pid -StartedAt $s.startedAt -Port $s.port -ClientExe $clientExe
+                    # 只清 owner 进程已经不在的残留：上一轮被强杀就等于 owner 已死，
+                    # 此时由本轮进程接管收尾权。owner 还活着的一律不动，交给它自己收尾。
+                    if ($s.owner_pid) {
+                        $ownerStillAlive = Get-Process -Id ([int]$s.owner_pid) -ErrorAction SilentlyContinue
+                        if ($ownerStillAlive -and $ownerStillAlive.Id -ne $PID) {
+                            Write-Output ("[跳过] 残留 uVision PID " + $s.pid + " 的启动进程 " + $s.owner_pid + " 仍在运行，交由它自己收尾，本轮不动。")
+                            continue
+                        }
+                        $c = Stop-OwnedUvision -ProcessId $s.pid -OwnerPid ([int]$s.owner_pid) -StartedAt $s.startedAt -Port $s.port -ClientExe $clientExe
+                    }
+                    else {
+                        # 老版本登记表没有 owner_pid，没有授权依据就不结束，只报告。
+                        Write-Output ("[跳过] 残留 uVision PID " + $s.pid + " 的登记条目没有 owner_pid（旧版本登记表），不确定归属，不结束。")
+                        continue
+                    }
                     Write-Output ("[INFO] 清理上次残留的 uVision PID " + $s.pid + " - " + $c.message)
                     if (-not (Get-Process -Id $s.pid -ErrorAction SilentlyContinue)) {
                         Remove-KeilOwnedRegistryEntry -ProcessId $s.pid

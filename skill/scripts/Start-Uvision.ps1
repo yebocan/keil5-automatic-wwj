@@ -84,10 +84,16 @@ Write-Verbose ("UV4 launched. PID={0} port={1}" -f $ownedPid, $Port)
 # 必须放在「等端口」之前：等待期间调用方就可能被强杀，那时 finally 不会执行。
 # 登记表让下一次运行能认出「这是本项目起的」，从而安全收尾。
 # 登记失败不影响启动流程，只记进 $registryError 由调用方判断。
+#
+# owner_pid 记的是 $PID（当前 PowerShell 进程）。Stop-OwnedUvision 会用
+# Get-ProcessParentId 核对 uVision 的父进程是否正是这个 owner_pid——对不上就
+# 拒绝结束。这样即使外部脚本猜到 PID 和启动时间，也关不掉我们的 uVision，
+# 我们也不会误关别人启动的 uVision。
+$ownerPid = $PID
 $registryPath = $null
 $registryError = $null
 try {
-    $registryPath = Register-OwnedUvision -ProcessId $ownedPid -StartedAt $ownedStart -Port $Port -Project $(if ($NoProject) { $null } else { $Project })
+    $registryPath = Register-OwnedUvision -ProcessId $ownedPid -OwnerPid $ownerPid -StartedAt $ownedStart -Port $Port -Project $(if ($NoProject) { $null } else { $Project })
 }
 catch {
     $registryError = $_.Exception.Message
@@ -111,7 +117,7 @@ while ((Get-Date) -lt $deadline) {
 }
 if (-not $listening) {
     # 启动失败时只清理自己刚起的那个进程。
-    $cleanup = Stop-OwnedUvision -ProcessId $ownedPid -StartedAt $ownedStart -Port $Port -ClientExe (Join-Path $PSScriptRoot 'UvSockClient.exe')
+    $cleanup = Stop-OwnedUvision -ProcessId $ownedPid -OwnerPid $ownerPid -StartedAt $ownedStart -Port $Port -ClientExe (Join-Path $PSScriptRoot 'UvSockClient.exe')
     if (-not (Get-Process -Id $ownedPid -ErrorAction SilentlyContinue)) {
         Remove-KeilOwnedRegistryEntry -ProcessId $ownedPid
     }
@@ -130,6 +136,7 @@ $info = [ordered]@{
     port_requested   = $requestedPort
     port_changed     = $portChanged
     pid              = $ownedPid
+    owner_pid        = $ownerPid
     started_at       = $(if ($ownedStart) { $ownedStart.ToString('s') } else { (Get-Date).ToString('s') })
     listening        = $true
     preexisting_pids = $preExistingPids

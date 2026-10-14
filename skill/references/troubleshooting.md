@@ -209,14 +209,25 @@ Get-Process UV4 -ErrorAction SilentlyContinue | Select-Object Id, Responding, Ma
 
 ## 自检把用户开着的 Keil 关掉了？
 
-不会。本技能清理 uVision 的唯一入口只有一个校验函数，三个条件全满足才动手：
+不会。本技能结束 uVision 进程的唯一入口是 `KeilCommon.ps1` 的 `Stop-OwnedUvision`，
+它有三道闸，**任何一道不过就直接拒绝**（`refused=true`、`attempted=false`），不进入任何结束动作：
 
-| 校验 | 说明 |
-|---|---|
-| PID 必须是脚本自己记下来的 | 没有登记 PID 就什么都不做 |
-| 进程名必须正好是 `UV4` | 防止 PID 被复用后误杀别的程序 |
-| 启动时间差不超过 2 秒 | 与登记时比，对不上就拒绝 |
+| 闸 | 说明 | 拒绝时的 `ownerCheck` |
+|---|---|---|
+| PID 必须在登记表里 | 登记表是 `%TEMP%\keil5-automatic-wwj\owned-uvision.json`，只有本 skill 自己启动的实例才会登记 | `no-registry-entry` / `entry-missing-owner` |
+| 调用方必须是登记下来的 owner | 调用方传入的 `-OwnerPid` 必须等于登记条目里的 `owner_pid`，且 owner 进程还活着 | `caller-not-owner:entry=X;caller=Y` / `owner-dead` / `owner-pid-reused` |
+| 进程名与启动时间必须对得上 | 进程名正好是 `UV4`，启动时间与登记值相差 ≤2 秒 | `not-uv4:Name` / `started_at mismatch` |
 
-清理顺序也是先礼后兵：先发 UVSOCK `exit` 让它自己退，再 `CloseMainWindow()`，最后才 `Stop-Process -Id <单个PID> -Force`。**全仓库没有一句按名字批量结束进程的代码。**
+清理顺序也是先礼后兵：先发 UVSOCK `exit` 让它自己退，再 `CloseMainWindow()`，最后才 `Stop-Process -Id <单个PID> -Force`，
+而且只针对登记表里那一个 PID。**全仓库没有一句按名字批量结束进程的代码。**
 
-集成自检还额外有一条断言：跑之前把所有已存在的 uVision PID 记下来，跑完逐个核对仍然存活（`safety.preexistingUvisionAlive`）。实测用户开着 1 个 / 2 个 Keil 时跑自检，用户实例全程存活。
+集成自检还额外有一条断言：跑之前把所有已存在的 uVision PID 记下来，跑完逐个核对仍然存活（`safety.preexistingUvisionAlive`）。
+实测用户开着 2 个 Keil 时跑 `run-test.ps1 -Test all`，自检结果 `PASS (26/26)`，
+`safety.preexistingUvisionAlive before=9596,13636 alive_after=9596,13636`，用户实例一个都没少。
+
+### owner 授权链为什么以登记表为准，而不是父进程
+
+早期版本用「PID 的父进程必须等于 owner」来判定，实测不安全：
+从桌面双击打开的 uVision，父进程是 `explorer`，任何脚本只要传 explorer 的 PID 就能冒充 owner 把用户的 Keil 关掉。
+现在的判定只认登记表：**没登记的 PID，就算把 PID、启动时间、父进程全传对了也一律拒绝**
+（实测 `refused=true`、`attempted=false`、进程存活，`ownerCheck=no-registry-entry`）。

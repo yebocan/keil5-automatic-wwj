@@ -239,8 +239,46 @@ function Resolve-KeilUv4 {
 # 安全约束（按优先级）：
 #   1. 绝不按名字批量结束 UV4 —— 用户可能同时开着别的 Keil 工程，强杀会丢未保存的修改。
 #   2. 只接受调用方显式传入的 PID，不猜、不扫、不按名字匹配。
-#   3. 结束前核对进程名与启动时间，防止 PID 被系统复用后误杀无关进程。
+#   3. 结束前必须同时满足三条授权条件（m04193 用户要求）：登记表里有这个 PID 的
+#     条目、条目里的 owner_pid 指向的进程仍然可用、且「当前进程就是这个 owner」
+#     或「owner 进程已经退出（由上一位残留接管收尾）」。缺任何一条都拒绝。
 #   4. 先优雅退出（UVSOCK exit → 关闭主窗口），都失败才强杀，且只杀这一个 PID。
+#
+# 为什么不能只比对「父进程 PID」：
+#   实测踩过的坑（2026-10-14）：只校验父进程时，用户从桌面打开的 uVision 父进程是
+#   explorer，任何脚本只要传 explorer 的 PID 就能通过校验，用户的 Keil 被误关。
+#   父进程只能证明「谁启动的」，不能证明「是不是本 skill 启动的」。真正的授权
+#   依据只有登记表——Start-Uvision.ps1 才会往里写，写的时候一定带上 owner_pid
+#   与 owner_started_at。用户自己打开的 uVision 没有条目，因此一律没有授权。
+
+function Get-ProcessParentId {
+    # 用 CIM 查父进程 PID。Get-CimInstance 在 Windows PowerShell 5.1 与 PS7 都可用。
+    # 拿不到（进程已退出 / 权限不足 / 非 Windows）时返回 $null，由调用方拒绝。
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    try {
+        $p = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        if ($p -and $p.ParentProcessId) { return [int]$p.ParentProcessId }
+    }
+    catch { }
+    return $null
+}
+
+function Get-RegistryEntry {
+    # 从登记表读出指定 PID 的原始条目（读不到返回 $null）。
+    # 返回的对象的 owner_pid / owner_started_at 由 Register-OwnedUvision 写入。
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $path = Get-KeilOwnedRegistryPath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        $entries = @(Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json)
+    }
+    catch { return $null }
+    foreach ($e in $entries) {
+        if ($e.pid -and [int]$e.pid -eq $ProcessId) { return $e }
+    }
+    return $null
+}
 
 function Get-ProcessIdentity {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
@@ -278,16 +316,21 @@ function Stop-OwnedUvision {
         [object]$StartedAt,
         [int]$Port,
         [string]$ClientExe,
-        [int]$GracefulWaitSeconds = 8
+        [int]$GracefulWaitSeconds = 8,
+        # 调用方自称的 owner PID。它必须与登记表里的 owner_pid 一致，或者
+        # 登记表里的 owner 进程已经退出（上一位残留，由下一棒接管收尾）。
+        # 省略时默认取当前进程 $PID（即「我就是启动者」）。
+        [int]$OwnerPid = $PID
     )
 
     $out = [ordered]@{
-        pid       = $ProcessId
-        attempted = $false
-        refused   = $false
-        method    = $null
-        killed    = $false
-        message   = $null
+        pid        = $ProcessId
+        attempted  = $false
+        refused    = $false
+        method     = $null
+        killed     = $false
+        message    = $null
+        ownerCheck = $null
     }
 
     if (-not $ProcessId -or $ProcessId -le 0) {
@@ -299,6 +342,62 @@ function Stop-OwnedUvision {
     if (-not $proc) {
         $out.message = "PID $ProcessId 已经退出，无需清理。"
         return [pscustomobject]$out
+    }
+
+    # ---- 闸 1：登记表授权（m04193 用户要求：不许动你自己打开的窗口）----
+    # 只有登记表里有条目、且授权链对得上的 PID 才允许结束。
+    # 登记表只由 Start-Uvision.ps1 写入，所以「有条目」就等于「是本 skill 起的」。
+    $entry = Get-RegistryEntry -ProcessId $ProcessId
+    if (-not $entry) {
+        $out.refused = $true
+        $out.ownerCheck = 'no-registry-entry'
+        $out.message = "PID $ProcessId 不在登记表里，无法确认是本 skill 启动的 uVision，拒绝结束。"
+        return [pscustomobject]$out
+    }
+
+    $recordedOwner = $null
+    if ($entry.owner_pid) { try { $recordedOwner = [int]$entry.owner_pid } catch { $recordedOwner = $null } }
+    if (-not $recordedOwner) {
+        $out.refused = $true
+        $out.ownerCheck = 'entry-missing-owner'
+        $out.message = "PID $ProcessId 的登记条目没有 owner_pid（旧版本登记表），授权链不完整，拒绝结束。"
+        return [pscustomobject]$out
+    }
+
+    # 调用方自称的 owner 必须与登记值一致；不一致直接拒绝（这是防「猜 PID 强关」的那道闸）
+    if ($OwnerPid -ne $recordedOwner) {
+        $out.refused = $true
+        $out.ownerCheck = "caller-not-owner:entry=$recordedOwner;caller=$OwnerPid"
+        $out.message = "PID $ProcessId 的登记启动者是 $recordedOwner，当前调用方是 $OwnerPid，无权结束。"
+        return [pscustomobject]$out
+    }
+
+    # 登记值里的启动者必须仍然可用。它已经退出时有两种情况：
+    #   a) 当前进程就是那个 owner（自己人，正常放行）；
+    #   b) owner 已死、当前调用方显式传了这个已死的 owner（上一棒被强杀，
+    #      由下一棒照着登记值接管收尾）。两种都放行，其余一律拒绝。
+    $ownerAlive = Get-Process -Id $recordedOwner -ErrorAction SilentlyContinue
+    if (-not $ownerAlive -and $OwnerPid -ne $PID) {
+        $out.refused = $true
+        $out.ownerCheck = 'owner-dead'
+        $out.message = "登记启动者进程 $recordedOwner 已不存在，无法确认归属，拒绝结束 PID $ProcessId。"
+        return [pscustomobject]$out
+    }
+    $out.ownerCheck = "ok:owner=$recordedOwner" + $(if ($ownerAlive) { '(alive)' } else { '(exited,handover)' })
+
+    # owner 进程虽然活着，但启动时间与登记值对不上 → PID 已被系统复用，
+    # 那它就不是当初的启动者，拒绝（防止「owner PID 被别的程序顶上」的情况）。
+    if ($ownerAlive -and $OwnerPid -eq $PID -and $entry.owner_started_at) {
+        $recOwnerStart = $null
+        try { $recOwnerStart = [datetime]::Parse($entry.owner_started_at) } catch { }
+        $curOwnerStart = $null
+        try { $curOwnerStart = $ownerAlive.StartTime } catch { }
+        if ($recOwnerStart -and $curOwnerStart -and [Math]::Abs(($curOwnerStart - $recOwnerStart).TotalSeconds) -gt 2) {
+            $out.refused = $true
+            $out.ownerCheck = 'owner-pid-reused'
+            $out.message = "启动者进程 $OwnerPid 的启动时间与登记值不符，疑似 PID 被复用，拒绝结束 PID $ProcessId。"
+            return [pscustomobject]$out
+        }
     }
 
     if ($proc.ProcessName -ne 'UV4') {
@@ -404,7 +503,12 @@ function Register-OwnedUvision {
         [Parameter(Mandatory = $true)][int]$ProcessId,
         [datetime]$StartedAt,
         [int]$Port,
-        [string]$Project
+        [string]$Project,
+        # 启动者进程 PID。省略时取当前进程 $PID。
+        # owner_pid + owner_started_at 是 Stop-OwnedUvision 授权链的依据：
+        # 没有它们，任何人都能借「猜中的 PID + 启动时间」关掉别人的 Keil。
+        [int]$OwnerPid = $PID,
+        [datetime]$OwnerStartedAt
     )
 
     $path = Get-KeilOwnedRegistryPath
@@ -425,6 +529,16 @@ function Register-OwnedUvision {
 
     $entries += [pscustomobject]@{
         pid        = $ProcessId
+        owner_pid  = $OwnerPid
+        # owner 进程自己的启动时间：PID 会被系统复用，光有 owner_pid 不够，
+        # 还得能证明「这个 PID 现在还是当初那个启动者」。
+        owner_started_at = $(if ($OwnerStartedAt) { $OwnerStartedAt.ToString('o') }
+            elseif ($OwnerPid) {
+                $ostart = $null
+                try { $ostart = (Get-Process -Id $OwnerPid -ErrorAction SilentlyContinue).StartTime } catch { }
+                if ($ostart) { $ostart.ToString('o') } else { $null }
+            }
+            else { $null })
         started_at = $(if ($StartedAt) { $StartedAt.ToString('o') } else { $null })
         port       = $Port
         project    = $Project
@@ -466,7 +580,9 @@ function Get-RegisteredOwnedUvision {
             startedAtMatches   = $false
             port               = $e.port
             project            = $e.project
+            owner_pid          = $(if ($e.owner_pid) { [int]$e.owner_pid } else { $null })
             owned              = $false
+            ownedReason        = $null
         }
         if ($proc -and $proc.ProcessName -eq 'UV4') {
             $item.owned = $true
@@ -474,19 +590,27 @@ function Get-RegisteredOwnedUvision {
                 $delta = [Math]::Abs(($item.startedAt - $recorded).TotalSeconds)
                 $item.startedAtMatches = ($delta -le 2)
                 # 启动时间对不上说明 PID 已被别的进程复用，撤销 owned 判定
-                if (-not $item.startedAtMatches) { $item.owned = $false }
+                if (-not $item.startedAtMatches) {
+                    $item.owned = $false
+                    $item.ownedReason = 'started_at mismatch (pid reused)'
+                }
             }
-        }
-        $result += $item
+            # owner_pid 缺失（老版本登记表）时不算 owned：没有授权依据就不给关的权限
+            if ($item.owned -and -not $item.owner_pid) {
+                $item.owned = $false
+                $item.ownedReason = 'no owner_pid in registry entry'
+            }
+            elseif ($item.owned) {
+                $item.ownedReason = 'ok'
+            }
+        }        $result += $item
     }
     return $result
 }
 
 # 清掉登记表里「已经确定不再属于本项目的」条目：进程已退出、进程名不再是 UV4、
-# 或启动时间与记录对不上（PID 被复用）。只删登记表里的记录，绝不结束任何进程。
-#
-# 为什么需要它：登记表只增不减的话，跑几十次测试后会积一大堆死 PID，
-# 每次运行都把它们当成「残留」报出来，真正的残留反而被淹没。
+# 或启动时间与记录对不上（PID 被复用）、或条目没有 owner_pid（无授权依据）。
+# 只删登记表里的记录，绝不结束任何进程。
 function Remove-KeilDeadRegistryEntries {
     [CmdletBinding()]
     param()
@@ -510,6 +634,7 @@ function Remove-KeilDeadRegistryEntries {
         $proc = Get-Process -Id ([int]$e.pid) -ErrorAction SilentlyContinue
         if (-not $proc) { continue }                       # 已退出
         if ($proc.ProcessName -ne 'UV4') { continue }      # PID 被别的程序复用了
+        if (-not $e.owner_pid) { continue }                # 没有 owner_pid = 没有授权依据
         if ($e.started_at) {
             $recorded = $null
             try { $recorded = [datetime]::Parse($e.started_at) } catch { }

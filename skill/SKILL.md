@@ -210,13 +210,13 @@ dbg-enter                   # 进入调试（异步，返回 SUCCESS 不代表�
 
 ## 进程安全（最高优先级）
 
-本 skill **绝不按名字批量结束进程**。清理 uVision 的唯一入口是 `Stop-OwnedUvision`，三个条件全部满足才动手：
+本 skill **绝不按名字批量结束进程**。结束 uVision 的唯一入口是 `Stop-OwnedUvision`，三道闸全部通过才动手：
 
-| 校验 | 不满足时 |
+| 闸 | 不满足时 |
 |---|---|
-| PID 必须是用 `Register-OwnedUvision` 登记过的 | 没有登记 PID 就什么都不做 |
-| 进程名必须正好是 `UV4` | `refused`（防 PID 复用后误杀别的程序） |
-| 启动时间与登记时相差不超过 2 秒 | `refused` |
+| PID 必须在登记表里（`%TEMP%\keil5-automatic-wwj\owned-uvision.json`，只有本 skill 自己启动的才登记） | `refused`，`ownerCheck=no-registry-entry` / `entry-missing-owner` |
+| 调用方传入的 `-OwnerPid` 必须等于登记条目里的 `owner_pid`，且 owner 进程仍存活 | `refused`，`ownerCheck=caller-not-owner:entry=X;caller=Y` / `owner-dead` / `owner-pid-reused` |
+| 进程名必须正好是 `UV4`，且启动时间与登记值相差不超过 2 秒 | `refused`，`ownerCheck=not-uv4:Name` / `started_at mismatch` |
 
 清理顺序：UVSOCK `exit` → `CloseMainWindow()` → `Stop-Process -Id <单个PID> -Force`。**全仓库没有一句 `Get-Process -Name UV4 | Stop-Process`。**
 
@@ -224,8 +224,9 @@ dbg-enter                   # 进入调试（异步，返回 SUCCESS 不代表�
 
 - `Get-UvisionProcesses()`（枚举）是**只读**的，只记录不结束。
 - `Start-Uvision.ps1` 检测到已有 uVision 实例时**不阻止、不清理**，只在输出里记 `preexisting_pids`；端口被占用会自动向后找空闲端口（输出 `port_requested`/`port_changed`）。
-- 集成自检有一条断言 `safety.preexistingUvisionAlive`：跑前记下所有已存在的 uVision PID，跑完逐个核对仍存活。**实测用户开着 1 个 / 2 个 Keil 时跑自检，用户实例全程存活。**
-- 启动 uVision 之前先写登记表（`%TEMP%\keil5-automatic-wwj\owned-uvision.json`），所以测试进程被强杀（Ctrl+C / 作业终止，`finally` 不执行）时，也能靠 `-CleanStaleUvision` 在下次收尾。
+- 集成自检有一条断言 `safety.preexistingUvisionAlive`：跑前记下所有已存在的 uVision PID，跑完逐个核对仍存活。**实测用户开着 2 个 Keil 时跑 `run-test.ps1 -Test all`，`PASS (26/26)`，用户实例一个都没少。**
+- 启动 uVision 之前先写登记表，所以测试进程被强杀（Ctrl+C / 作业终止，`finally` 不执行）时，也能靠 `-CleanStaleUvision` 在下次收尾；`-CleanStaleUvision` 现在会跳过「登记的 owner 进程还活着」的条目，交给那个 owner 自己收尾。
+- **授权只看登记表，不看父进程。** 用户从桌面打开的 uVision 父进程是 `explorer`，靠父进程判定会被冒充（早期版本实测过这个漏洞，已改掉）。没登记的 PID，就算 PID、启动时间、父进程全对也一律拒绝。
 
 ## 给用户工程做调试的常规流程
 

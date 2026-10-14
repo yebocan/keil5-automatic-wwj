@@ -381,6 +381,80 @@ try {
     try { $null = Remove-KeilDeadRegistryEntries } catch { $threw = $true }
     Check 'registry.purgeCorruptClean' (-not $threw) ('threw=' + $threw)
 
+    # ---- owner 授权链（m04193 用户要求：只关自己打开的，绝不动别人的窗口）----
+    # 旧版登记表条目没有 owner_pid：读回时必须判为不 owned，
+    # 并且 Remove-KeilDeadRegistryEntries 要把它当无效条目清掉
+    Remove-Item -LiteralPath $regPath -Force -ErrorAction SilentlyContinue
+    '{"pid":' + $PID + ',"started_at":"' + (Get-Date).AddSeconds(-1).ToString('o') + '","port":4242,"project":"legacy"}' |
+        Set-Content -LiteralPath $regPath -Encoding UTF8
+    $legacy = @(Get-RegisteredOwnedUvision | Where-Object { $_.pid -eq $PID })
+    Check 'registry.legacyEntryNoOwner' ($legacy.Count -eq 1 -and -not $legacy[0].owned -and -not $legacy[0].owner_pid) `
+        ("owned=" + $(if ($legacy.Count) { $legacy[0].owned } else { 'n/a' }) + " owner_pid=" + $(if ($legacy.Count) { $legacy[0].owner_pid } else { 'n/a' }))
+    $purged2 = Remove-KeilDeadRegistryEntries
+    Check 'registry.purgeDropsOwnerless' ($purged2.removed -ge 1 -and -not (Test-Path -LiteralPath $regPath)) `
+        ("removed=" + $purged2.removed + " kept=" + $purged2.kept)
+
+    # 登记必须写入 owner_pid（默认取当前进程）
+    Remove-Item -LiteralPath $regPath -Force -ErrorAction SilentlyContinue
+    $null = Register-OwnedUvision -ProcessId $PID -StartedAt (Get-Date) -Port 4321 -Project 'owner-test'
+    $ownedItem = @(Get-RegisteredOwnedUvision | Where-Object { $_.pid -eq $PID })
+    Check 'registry.recordsOwnerPid' ($ownedItem.Count -eq 1 -and $ownedItem[0].owner_pid -eq $PID) `
+        ("owner_pid=" + $(if ($ownedItem.Count) { $ownedItem[0].owner_pid } else { 'n/a' }))
+    $null = Register-OwnedUvision -ProcessId $PID -OwnerPid 987654 -StartedAt (Get-Date) -Port 4322 -Project 'owner-test'
+    $ownedItem = @(Get-RegisteredOwnedUvision | Where-Object { $_.pid -eq $PID })
+    Check 'registry.ownerPidOverridable' ($ownedItem.Count -eq 1 -and $ownedItem[0].owner_pid -eq 987654) `
+        ("owner_pid=" + $(if ($ownedItem.Count) { $ownedItem[0].owner_pid } else { 'n/a' }))
+
+    # Stop-OwnedUvision：owner 对不上必须拒绝（拿自己当靶子，owner 传一个不相干的 PID）
+    $me = $PID
+    $c5 = Stop-OwnedUvision -ProcessId $me -OwnerPid 987654 -StartedAt (Get-Date)
+    $alive2 = [bool](Get-Process -Id $me -ErrorAction SilentlyContinue)
+    Check 'proc.refusesForeignOwner' ($c5.refused -and (-not $c5.attempted) -and $alive2) `
+        ("refused=" + $c5.refused + " alive=" + $alive2 + " ownerCheck=" + $c5.ownerCheck + " message=" + $c5.message)
+
+    # owner 进程不存在时必须拒绝（PID 被复用的高危场景）
+    $deadOwner = 4195000
+    while (Get-Process -Id $deadOwner -ErrorAction SilentlyContinue) { $deadOwner++ }
+    $c6 = Stop-OwnedUvision -ProcessId $me -OwnerPid $deadOwner -StartedAt (Get-Date)
+    Check 'proc.refusesDeadOwner' ($c6.refused -and (-not $c6.attempted) -and $alive2) `
+        ("refused=" + $c6.refused + " ownerCheck=" + $c6.ownerCheck)
+
+    # 默认 OwnerPid 就是当前进程：登记值不是当前进程时必须带着 caller-not-owner 拒绝
+    $c7 = Stop-OwnedUvision -ProcessId $me -StartedAt (Get-Date)
+    Check 'proc.defaultOwnerIsSelf' ($c7.refused -and $c7.ownerCheck -like ('caller-not-owner:*caller=' + $me)) `
+        ("ownerCheck=" + $c7.ownerCheck)
+
+    # 把登记值换回当前进程后，owner 闸应放行（随后仍因进程名不是 UV4 被拒）——
+    # 这条证明授权链不会把「自己登记的自己」挡在门外。
+    $null = Register-OwnedUvision -ProcessId $me -OwnerPid $me -OwnerStartedAt (Get-Process -Id $me).StartTime -StartedAt (Get-Date) -Port 4321 -Project 'owner-test'
+    $c7b = Stop-OwnedUvision -ProcessId $me -StartedAt (Get-Date)
+    Check 'proc.defaultOwnerMatchesRegistry' ($c7b.ownerCheck -like 'ok:owner=*') `
+        ("ownerCheck=" + $c7b.ownerCheck + " refused=" + $c7b.refused + " message=" + $c7b.message)
+    Remove-KeilOwnedRegistryEntry -ProcessId $me
+
+    # 源码层面：Start-Uvision 必须把 owner_pid 传进登记与清理
+    $suTxt = Get-Content -LiteralPath (Join-Path $scriptRoot 'Start-Uvision.ps1') -Raw
+    Check 'registry.startUvisionPassesOwner' ($suTxt -match 'Register-OwnedUvision\s+-ProcessId\s+\$ownedPid\s+-OwnerPid' -and $suTxt -match 'Stop-OwnedUvision\s+-ProcessId\s+\$ownedPid\s+-OwnerPid') `
+        'Start-Uvision.ps1 passes -OwnerPid to both register and stop'
+    # 登记表必须是授权的唯一依据：Stop-OwnedUvision 必须先查登记条目
+    $kcTxt2 = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'KeilCommon.ps1') -Raw
+    Check 'registry.stopChecksRegistryEntry' ($kcTxt2 -match 'Get-RegistryEntry\s+-ProcessId\s+\$ProcessId' -and $kcTxt2 -match 'no-registry-entry') 'Stop-OwnedUvision requires a registry entry'
+    # 登记表里没有 owner_pid 的旧条目必须被拒绝（授权链不完整）
+    Check 'registry.stopRejectsOwnerlessEntry' ($kcTxt2 -match 'entry-missing-owner') 'ownerless entries are refused'
+    # 登记的 owner 启动时间必须写入，用于防 owner PID 被复用
+    Check 'registry.recordsOwnerStart' ($kcTxt2 -match 'owner_started_at' -and $kcTxt2 -match 'owner-pid-reused') 'owner start time is recorded and verified'
+    # -CleanStaleUvision 分支必须按 owner 判断，不能无脑清
+    $rtTxt2 = Get-Content -LiteralPath (Join-Path $scriptRoot 'run-test.ps1') -Raw
+    Check 'registry.staleCleanupChecksOwner' ($rtTxt2 -match 'owner_pid' -and $rtTxt2 -match 'ownerStillAlive' -and $rtTxt2 -match 'OwnerPid \(\[int\]\$s\.owner_pid\)') 'run-test.ps1 stale cleanup respects owner'
+
+    # 全仓库不允许出现按名字批量结束 UV4 的写法
+    $scan = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath $scriptRoot -Filter '*.ps1' -File)) {
+        $t = Get-Content -LiteralPath $f.FullName -Raw
+        if ($t -match 'Stop-Process\s+-Name\s+UV4' -or $t -match 'Get-Process\s+-Name\s+UV4[^\r\n]*\|\s*Stop-Process') { $scan += $f.Name }
+    }
+    Check 'proc.noNameBasedKill' ($scan.Count -eq 0) ('files=' + $(if ($scan.Count) { $scan -join ',' } else { 'none' }))
+
     # Stop-OwnedUvision 结束后必须顺手撤掉登记条目（否则登记表只增不减）
     $kcTxt = Get-Content -LiteralPath (Join-Path $scriptRoot 'KeilCommon.ps1') -Raw
     $stopBlock = [regex]::Match($kcTxt, '(?s)function Stop-OwnedUvision \{.*?\n\}')

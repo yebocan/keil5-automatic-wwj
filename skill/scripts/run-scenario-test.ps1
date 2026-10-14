@@ -481,11 +481,12 @@ if ($realOk) {
         }
     }
     finally {
-        # 只清理本段自己启动的实例（有明确 PID），逐个走 Stop-OwnedUvision
+        # 只清理本段自己启动的实例（有明确 PID），逐个走 Stop-OwnedUvision。
+        # 必须显式传 -OwnerPid $PID：这些进程是本段脚本启动的，父进程就是本进程。
         foreach ($pp in $userSim) {
             if (Get-Process -Id $pp -ErrorAction SilentlyContinue) {
                 $ident = Get-ProcessIdentity -ProcessId $pp
-                $null = Stop-OwnedUvision -ProcessId $pp -StartedAt $ident.startedAt -ClientExe $clientExe -GracefulWaitSeconds 5
+                $null = Stop-OwnedUvision -ProcessId $pp -OwnerPid $PID -StartedAt $ident.startedAt -ClientExe $clientExe -GracefulWaitSeconds 5
             }
         }
     }
@@ -505,6 +506,52 @@ $c2 = Stop-OwnedUvision -ProcessId $PID -StartedAt (Get-Date)
 $meAlive = [bool](Get-Process -Id $PID -ErrorAction SilentlyContinue)
 Check 'scenario.cleanupRefusesNonUv4' ($c2.refused -eq $true -and $meAlive) 'offline' `
     ("refused=" + $c2.refused + " 本进程存活=" + $meAlive)
+
+# 离线：owner 授权链 —— 登记表是唯一授权依据，没有条目的一律不许关。
+# m04193 用户要求：只关自己打开的，绝不动别人打开的窗口。
+$ownerProbe = $null
+try {
+    $ownerProbe = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60') -PassThru -WindowStyle Hidden
+}
+catch { }
+if ($ownerProbe) {
+    # 1) 压根没登记 → 必须拒绝，进程必须活着（这是防「猜 PID 强关」的核心）
+    $c3 = Stop-OwnedUvision -ProcessId $ownerProbe.Id -OwnerPid $PID -StartedAt (Get-Date)
+    $probeAlive = [bool](Get-Process -Id $ownerProbe.Id -ErrorAction SilentlyContinue)
+    Check 'scenario.cleanupRefusesUnregistered' (($c3.refused -eq $true -or $c3.attempted -eq $false) -and $probeAlive) 'offline' `
+        ("无登记条目 refused=" + $c3.refused + " 靶进程存活=" + $probeAlive + " ownerCheck=" + $c3.ownerCheck)
+
+    # 2) 登记了、owner 传对了 → 授权闸必须放行（随后才可能因进程名不是 UV4 被拒），
+    #    这条证明「授权链不会把合法的自己人也挡在门外」。
+    $null = Register-OwnedUvision -ProcessId $ownerProbe.Id -OwnerPid $PID -OwnerStartedAt (Get-Process -Id $PID).StartTime -StartedAt (Get-Date) -Port 43199 -Project $null
+    $c3b = Stop-OwnedUvision -ProcessId $ownerProbe.Id -StartedAt (Get-Date)
+    Check 'scenario.cleanupAcceptsRightOwner' ((-not $c3b.ownerCheck) -or $c3b.ownerCheck -like 'ok:*') 'offline' `
+        ("ownerCheck=" + $c3b.ownerCheck + " refused=" + $c3b.refused + " message=" + $c3b.message)
+
+    # 3) 登记了、但调用方自称的 owner 与登记值不符 → 必须拒绝
+    $otherOwner = 4193000
+    while (Get-Process -Id $otherOwner -ErrorAction SilentlyContinue) { $otherOwner++ }
+    $c3c = Stop-OwnedUvision -ProcessId $ownerProbe.Id -OwnerPid $otherOwner -StartedAt (Get-Date)
+    $probeAlive2 = [bool](Get-Process -Id $ownerProbe.Id -ErrorAction SilentlyContinue)
+    Check 'scenario.cleanupRefusesForeignOwner' ($c3c.refused -eq $true -and $probeAlive2) 'offline' `
+        ("owner=" + $otherOwner + " 冲突，refused=" + $c3c.refused + " 靶进程存活=" + $probeAlive2 + " ownerCheck=" + $c3c.ownerCheck)
+
+    try { Stop-Process -Id $ownerProbe.Id -Force -ErrorAction SilentlyContinue } catch { }
+    Remove-KeilOwnedRegistryEntry -ProcessId $ownerProbe.Id
+}
+else {
+    Check 'scenario.cleanupRefusesUnregistered' $false 'offline' '未能启动探针进程，未执行'
+    Check 'scenario.cleanupAcceptsRightOwner' $false 'offline' '未能启动探针进程，未执行'
+    Check 'scenario.cleanupRefusesForeignOwner' $false 'offline' '未能启动探针进程，未执行'
+}
+
+# 离线：owner 进程已退出时必须拒绝（PID 被复用是最高危场景）
+$deadOwnerPid = 4194000
+while (Get-Process -Id $deadOwnerPid -ErrorAction SilentlyContinue) { $deadOwnerPid++ }
+$c4 = Stop-OwnedUvision -ProcessId $PID -OwnerPid $deadOwnerPid -StartedAt (Get-Date)
+$meAlive2 = [bool](Get-Process -Id $PID -ErrorAction SilentlyContinue)
+Check 'scenario.cleanupRefusesDeadOwner' (($c4.refused -eq $true -or $c4.attempted -eq $false) -and $meAlive2) 'offline' `
+    ("owner=" + $deadOwnerPid + " 不存在，refused=" + $c4.refused + " 本进程存活=" + $meAlive2 + " ownerCheck=" + $c4.ownerCheck)
 }
 
 # =====================================================================
