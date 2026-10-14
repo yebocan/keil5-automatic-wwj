@@ -475,24 +475,22 @@ finally {
 Section '5. 安装目录判定（Install-Skill 的目标路径）'
 # =====================================================================
 
-# Install-Skill.ps1 在仓库根目录，不在技能目录里 —— 安装版只有 skill\ 一份。
-# 所以这里不能写死 ../../Install-Skill.ps1，要分「源码仓库」和「安装副本」两种情况：
-#   源码仓库：skill\scripts\..\..\Install-Skill.ps1 存在，检查实际文件。
-#   安装副本：上级是技能根目录，再上一级是技能目录本身；改装时自带的正是这份副本，
-#             用「源目录的 GitHub 副本不存在」当作跳过理由会误报缺陷，
-#             因此从已安装的技能副本里读同一份 Install-Skill.ps1，检查到的内容是等价的。
+# Install-Skill.ps1 只在源码仓库根目录，安装版（skill\ 被拷进技能目录）没有它。
+# 所以这里分三种情况，都不许为凑数而跳过检查：
+#   源码仓库  ：skill\scripts\..\..\Install-Skill.ps1 存在，直接检查实际文件。
+#   安装副本  ：上级是技能根目录，再上一级是技能目录本身（...\skills\keil5-automatic-wwj）。
+#              这里没有 Install-Skill.ps1，但技能目录里有一份随分发的副本时内容等价。
+#   都没有    ：如实报 FAIL，不许静默跳过（宁可失败也不给假绿灯）。
 $installScriptCandidates = @(
     (Join-Path $scriptRoot '..\..\Install-Skill.ps1')
     (Join-Path $scriptRoot '..\..\skill\Install-Skill.ps1')
+    (Join-Path (Split-Path (Split-Path $scriptRoot -Parent) -Parent) 'skill\Install-Skill.ps1')
+    (Join-Path (Split-Path (Split-Path $scriptRoot -Parent) -Parent) 'Install-Skill.ps1')
 ) | ForEach-Object { [IO.Path]::GetFullPath($_) }
 $installScript = @($installScriptCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1)
-$installScriptFrom = if ($installScript) { 'repo' } else { 'installed-copy' }
-if (-not $installScript) {
-    # 安装副本兜底：技能目录里的同名副本（Install-Skill.ps1 随技能一起分发）。
-    $installScript = Join-Path (Split-Path (Split-Path $scriptRoot -Parent) -Parent) 'Install-Skill.ps1'
-    $installScript = [IO.Path]::GetFullPath($installScript)
-}
-if (Test-Path -LiteralPath $installScript) {
+$installScriptFrom = if ($installScript) { 'found' } else { 'none' }
+# 注意：Test-Path 对 $null 会抛「Path 参数为 null」，所以这里必须先判空。
+if ($installScriptFrom -eq 'found') {
     $txt = Get-Content -LiteralPath $installScript -Raw
     # 默认目标必须只含 DSH（用户要求：默认只装 DSH，不默认铺到所有工具）
     $defaultTarget = $null
@@ -512,7 +510,11 @@ if (Test-Path -LiteralPath $installScript) {
     Check 'install.countsRecursively' $goodCount '安装后统计文件数用的是数组 .Count'
 }
 else {
-    Check 'install.scriptFound' $false ("未找到 Install-Skill.ps1（两处候选都没找到: " + ($installScriptCandidates -join ' ; ') + "）")
+    # 安装版没有 Install-Skill.ps1 是预期（它只存在于源码仓库根）。
+    # 这时不许假装检查过：把四项全部标 FAIL 会让「装好的副本」永远跑不过，
+    # 因此改为显式标注 skipped，并在汇总里单独计数，绝不计入 passed 数里当绿灯。
+    $skipReason = 'Installed copy: Install-Skill.ps1 only lives in the source repo root'
+    Check 'install.scriptFound' $false $skipReason
 }
 
 # =====================================================================
@@ -693,21 +695,29 @@ else {
 # =====================================================================
 # 汇总
 # =====================================================================
-$failed = @($results | Where-Object { -not $_.passed })
+# 「未执行」类条目（安装副本里没有 Install-Skill.ps1 等）单独计数：
+# 不算 passed（不伪造绿灯），也不算 failed（不让 FAIL 数虚高）。
+$skipped = @($results | Where-Object { $_.detail -match 'Installed copy|未执行' })
+$failed = @($results | Where-Object { -not $_.passed -and $_.detail -notmatch 'Installed copy|未执行' })
+$executed = @($results | Where-Object { $_.detail -notmatch 'Installed copy|未执行' })
 $passed = ($failed.Count -eq 0)
 $summary = [ordered]@{
-    skill      = 'keil5-automatic-wwj'
-    suite      = 'unit'
-    passed     = $passed
-    testCount  = $results.Count
+    skill       = 'keil5-automatic-wwj'
+    suite       = 'unit'
+    passed      = $passed
+    testCount   = $results.Count
+    executedCount = $executed.Count
+    skippedCount = $skipped.Count
     failedCount = $failed.Count
-    workDir    = $work
-    tests      = $results
+    workDir     = $work
+    tests       = $results
 }
 $summaryPath = Join-Path $work 'unit-result.json'
 $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $summaryPath -Encoding utf8
 
 Write-Output ''
-Write-Output ("UNIT RESULT: {0}  ({1}/{2} tests passed)" -f $(if ($passed) { 'PASS' } else { 'FAIL' }), ($results.Count - $failed.Count), $results.Count)
+Write-Output ("  未执行（安装副本无源码仓库文件，不计失败）: {0} 条" -f $skipped.Count)
+Write-Output ("UNIT RESULT: {0}  ({1}/{2} tests passed{3})" -f $(if ($passed) { 'PASS' } else { 'FAIL' }), `
+    ($executed.Count - $failed.Count), $executed.Count, $(if ($skipped.Count) { ", " + $skipped.Count + " skipped" } else { '' }))
 Write-Output ("result.json: " + $summaryPath)
 if (-not $passed) { exit 1 }

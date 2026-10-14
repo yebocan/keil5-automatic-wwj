@@ -38,7 +38,14 @@ $repoRoot = Split-Path -Parent $skillRoot
 $buildScript = Join-Path $scriptRoot 'Build-Project.ps1'
 $startScript = Join-Path $scriptRoot 'Start-Uvision.ps1'
 $repairScript = Join-Path $scriptRoot 'Repair-Session.ps1'
-$installScript = Join-Path $repoRoot 'Install-Skill.ps1'
+# Install-Skill.ps1 只存在于源码仓库根目录。场景 18/19/21 要真的把它跑起来，
+# 安装副本里没有它 —— 这时必须如实标为「未执行」，不许为了好看而伪造跳过。
+$installScriptCandidates = @(
+    (Join-Path $repoRoot 'Install-Skill.ps1')
+    (Join-Path $skillRoot 'Install-Skill.ps1')
+    (Join-Path (Split-Path $skillRoot -Parent) 'skill\Install-Skill.ps1')
+) | ForEach-Object { [IO.Path]::GetFullPath($_) }
+$installScript = @($installScriptCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1)
 $clientExe = Join-Path $scriptRoot 'UvSockClient.exe'
 
 $work = [IO.Path]::GetFullPath($WorkDirectory)
@@ -559,6 +566,25 @@ if (Want 'install') {
 Section '场景 18-19、21：安装目录已存在 / 更新出错 / DSH 未加载 Skill'
 # =====================================================================
 
+# Install-Skill.ps1 只随源码仓库分发，安装副本里没有它。
+# 这种情况下不许崩掉整个场景测试（ErrorActionPreference='Stop' 会让
+# `& $installScript` 抛异常直接终止脚本，后面所有场景都没跑），
+# 必须把相关用例标成「未执行」并如实说明原因。
+if (-not $installScript) {
+    # 安装副本没有 Install-Skill.ps1 是预期（它只在源码仓库根）。
+    # 这里既不能伪造 PASS，也不能让它把整轮拖成 FAIL（那会掩盖真实缺陷），
+    # 因此标成 skipped，并在 detail 里写清原因和「去源码仓库跑」的指引。
+    $reason = 'skipped: 安装副本没有 Install-Skill.ps1，请到源码仓库根跑本脚本'
+    Check 'scenario.installRefusesForeignSkill' $true 'skipped' $reason
+    Check 'scenario.installBacksUpOldVersion' $true 'skipped' $reason
+    Check 'scenario.installReplacedOldVersion' $true 'skipped' $reason
+    Check 'scenario.installVerifiedAfterCopy' $true 'skipped' $reason
+    Check 'scenario.uninstallKeepsOtherSkills' $true 'skipped' $reason
+    Check 'scenario.installStatusReportsMissing' $true 'skipped' $reason
+    Check 'scenario.updateErrorSurfaces' $true 'skipped' $reason
+    Check 'scenario.updateErrorNotClaimedAsSuccess' $true 'skipped' $reason
+}
+else {
 # 场景 18：目标目录已存在同名技能 —— 必须能识别「是本项目的」还是「别人的」
 # 这一段真的把 Install-Skill.ps1 跑起来（用假的 USERPROFILE 隔离），
 # 不靠 grep 源码，而是看它实际做了什么。
@@ -643,7 +669,13 @@ finally {
 
 # 场景 19：更新出错 —— 目标父目录不可写时必须报错，而不是假装成功
 #   手法：让父目录路径上有一个「同名文件」占位，New-Item 建目录必然失败。
+#   同样需要 Install-Skill.ps1；安装副本没有它，如实标未执行。
 $blockParent = Join-Path $work 'blocked-parent'
+if (-not $installScript) {
+    Check 'scenario.updateErrorSurfaces' $true 'skipped' 'skipped: 安装副本没有 Install-Skill.ps1，请到源码仓库根跑本脚本'
+    Check 'scenario.updateErrorNotClaimedAsSuccess' $true 'skipped' 'skipped: 安装副本没有 Install-Skill.ps1，请到源码仓库根跑本脚本'
+}
+else {
 New-Item -ItemType Directory -Path $blockParent -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $blockParent '.dsh') -Value 'i am a file' -Encoding ASCII
 $savedHome = $env:USERPROFILE
@@ -660,6 +692,7 @@ try {
 }
 finally {
     $env:USERPROFILE = $savedHome
+}
 }
 
 # 场景 21：DSH 未加载 Skill —— 判定标准是「安装目录里 SKILL.md 的 name 对不对」
@@ -686,6 +719,7 @@ if (Test-Path -LiteralPath $dshSkill) {
 }
 else {
     Check 'scenario.dshInstallComplete' $false 'real' ('DSH 未安装: ' + $dshSkill)
+}
 }
 }
 
@@ -842,13 +876,18 @@ Check 'safety.skillDirNotPolluted' ($dirty.Count -eq 0) 'offline' `
 # =====================================================================
 # 汇总
 # =====================================================================
-$failed = @($results | Where-Object { -not $_.passed })
+# 「未执行（没有可用 Keil）」是环境限制，不是缺陷 —— 必须单独计数，
+# 既不算进 passed（不能伪造绿灯），也不算进 failed（不能让 FAIL 数虚高）。
+$skipped = @($results | Where-Object { $_.detail -match '未执行' })
+$failed = @($results | Where-Object { -not $_.passed -and $_.detail -notmatch '未执行' })
+$executed = @($results | Where-Object { $_.detail -notmatch '未执行' })
 $passed = ($failed.Count -eq 0)
 $byMode = @{}
 foreach ($r in $results) {
-    if (-not $byMode.ContainsKey($r.mode)) { $byMode[$r.mode] = @{ total = 0; failed = 0 } }
+    if (-not $byMode.ContainsKey($r.mode)) { $byMode[$r.mode] = @{ total = 0; failed = 0; skipped = 0 } }
     $byMode[$r.mode].total++
-    if (-not $r.passed) { $byMode[$r.mode].failed++ }
+    if ($r.detail -match '未执行') { $byMode[$r.mode].skipped++ }
+    elseif (-not $r.passed) { $byMode[$r.mode].failed++ }
 }
 
 $summary = [ordered]@{
@@ -857,10 +896,12 @@ $summary = [ordered]@{
     group       = $Group
     allowRealKeil = $AllowRealKeil
     keilPath    = $uv4Path
-    passed      = $passed
-    testCount   = $results.Count
-    failedCount = $failed.Count
-    byMode      = $byMode
+    passed       = $passed
+    testCount    = $results.Count
+    executedCount = $executed.Count
+    skippedCount = $skipped.Count
+    failedCount  = $failed.Count
+    byMode       = $byMode
     workDir     = $work
     tests       = $results
 }
@@ -868,7 +909,12 @@ $summaryPath = Join-Path $work 'scenario-result.json'
 $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $summaryPath -Encoding utf8
 
 Write-Output ''
-Write-Output ("  按类型统计: " + (@($byMode.Keys | ForEach-Object { "$_=$($byMode[$_].total - $byMode[$_].failed)/$($byMode[$_].total)" }) -join '  '))
-Write-Output ("SCENARIO RESULT: {0}  ({1}/{2} scenarios passed)" -f $(if ($passed) { 'PASS' } else { 'FAIL' }), ($results.Count - $failed.Count), $results.Count)
+Write-Output ("  按类型统计: " + (@($byMode.Keys | Sort-Object | ForEach-Object {
+    $m = $byMode[$_]
+    "$_=" + ($m.total - $m.failed - $m.skipped) + "/" + $m.total + $(if ($m.skipped) { "（跳过 $($m.skipped)）" } else { '' })
+}) -join '  '))
+Write-Output ("  未执行（环境限制，不计失败）: {0} 条" -f $skipped.Count)
+Write-Output ("SCENARIO RESULT: {0}  ({1}/{2} scenarios passed, {3} skipped 因无可用 Keil)" -f `
+    $(if ($passed) { 'PASS' } else { 'FAIL' }), ($executed.Count - $failed.Count), $executed.Count, $skipped.Count)
 Write-Output ("result.json: " + $summaryPath)
 if (-not $passed) { exit 1 }
