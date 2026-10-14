@@ -127,7 +127,24 @@ do {
 
 进调试失败（如探针未连接）后，uVision 主线程可能卡住。`Get-Process UV4 | Select Responding` 会显示 `False`。
 
-处置：`Stop-Process -Name UV4 -Force`，然后用 `Start-Uvision.ps1` 重启。**不要反复发命令**，只会让它卡得更死。
+处置：**只结束自己启动的那个 uVision**，然后重启。判断方法：
+
+```powershell
+Get-Process UV4 | Select-Object Id, Responding, StartTime, MainWindowTitle
+```
+
+若确认要结束某个具体实例，用 `-Id` 指定 PID（绝不用 `-Name` 批量结束，那会关掉用户自己的工程）：
+
+```powershell
+Stop-Process -Id <PID> -Force
+```
+
+也可以用技能里的安全清理函数（它会先校验进程名与启动时间才动手）：
+
+```powershell
+. "$env:USERPROFILE\.dsh\skills\keil5-automatic-wwj\scripts\KeilCommon.ps1"
+Stop-OwnedUvision -ProcessId <PID> -StartedAt (Get-Process -Id <PID>).StartTime
+```
 
 ### `dbg-exit` 返回 `11 TARGET_EXECUTING`
 
@@ -155,13 +172,25 @@ do {
 
 ### 提示找不到 `UV4.exe`
 
-用 `-Uv4` 参数显式指定，或用 `KEIL_UV4` 环境变量：
+用 `-Uv4` 参数显式指定，或用 `KEIL5_UV4` 环境变量：
 
 ```powershell
-$env:KEIL_UV4 = "D:\Keil\UV4\UV4.exe"
+$env:KEIL5_UV4 = "D:\Keil\UV4\UV4.exe"
 ```
 
-脚本的查找顺序是：`-Uv4` 参数 → `KEIL_UV4` 环境变量 → 注册表 → 常见安装路径。
+脚本的查找顺序是：`-Uv4` 参数 → `KEIL5_UV4` 环境变量 → 配置文件 `%APPDATA%\keil5-automatic-wwj\config.json` → 常见安装路径（F:\Keil5、C:\Keil_v5、D:\Keil_v5、E:\Keil_v5、C:\Keil、D:\Keil、E:\Keil 下的 `UV4\UV4.exe`）→ PATH。
+
+**不读注册表、不扫全盘**，只做定点探测。全部落空时错误提示会把试过的来源逐条列出来。
+
+想一劳永逸就用配置脚本，写一次以后所有脚本都不用再传 `-Uv4`：
+
+```powershell
+$s = "$env:USERPROFILE\.dsh\skills\keil5-automatic-wwj\scripts\Set-KeilPath.ps1"
+& $s -Uv4 "D:\Keil\UV4\UV4.exe"    # 指定路径并写入
+& $s -Show                          # 看当前用的是哪个、从哪来的
+```
+
+如果配置文件本身是坏的（JSON 语法错），脚本会打印警告「已忽略该文件，继续按候选路径查找」，不会静默使用错误的路径。
 
 ### 换了台机器要改什么
 
@@ -174,5 +203,20 @@ $env:KEIL_UV4 = "D:\Keil\UV4\UV4.exe"
 ```powershell
 Get-NetTCPConnection -LocalPort 41950 -ErrorAction SilentlyContinue
 Get-Process UV4 -ErrorAction SilentlyContinue | Select-Object Id, Responding, MainWindowTitle
-Stop-Process -Name UV4 -Force      # 清理全部 uVision 实例
 ```
+
+> **不要用 `Stop-Process -Name UV4 -Force` 清理。** 那会一次性结束机器上所有 uVision 实例，包括用户正在用的工程。要结束实例就带 `-Id` 指定单个 PID。
+
+## 自检把用户开着的 Keil 关掉了？
+
+不会。本技能清理 uVision 的唯一入口只有一个校验函数，三个条件全满足才动手：
+
+| 校验 | 说明 |
+|---|---|
+| PID 必须是脚本自己记下来的 | 没有登记 PID 就什么都不做 |
+| 进程名必须正好是 `UV4` | 防止 PID 被复用后误杀别的程序 |
+| 启动时间差不超过 2 秒 | 与登记时比，对不上就拒绝 |
+
+清理顺序也是先礼后兵：先发 UVSOCK `exit` 让它自己退，再 `CloseMainWindow()`，最后才 `Stop-Process -Id <单个PID> -Force`。**全仓库没有一句按名字批量结束进程的代码。**
+
+集成自检还额外有一条断言：跑之前把所有已存在的 uVision PID 记下来，跑完逐个核对仍然存活（`safety.preexistingUvisionAlive`）。实测用户开着 1 个 / 2 个 Keil 时跑自检，用户实例全程存活。

@@ -1,6 +1,6 @@
 # 各平台安装说明
 
-本技能是纯文件形态（`SKILL.md` + `scripts/` + `references/` + `assets/`），没有安装程序、没有依赖。所谓"安装"就是把 `skill\` 目录整体复制到目标客户端的技能目录，改名为技能名。
+本技能是纯文件形态（`SKILL.md` + `scripts/` + `references/` + `assets/`），没有安装程序、没有依赖。所谓「安装」就是把 `skill\` 目录整体复制到目标客户端的技能目录，文件夹名取 `SKILL.md` frontmatter 里的 `name`。
 
 本页路径均已在作者机器（Windows 10/11，用户 `yebocan`）上核实。**换机器后请先确认目标客户端实际扫描哪个目录，不要照抄本文档的用户名。**
 
@@ -16,6 +16,8 @@
 
 > `%USERPROFILE%` 通常是 `C:\Users\<你的用户名>`；`%LOCALAPPDATA%` 通常是 `C:\Users\<你的用户名>\AppData\Local`。
 
+**路径不是猜的**：DSH 的来源表来自技能管理器源码 `lib/core.js` 的 `userRoots()`；豆包的路径来自客户端日志里的 `local_skill_paths`；WorkBuddy 的路径来自其技能列表缓存里现有条目的 `filePath`。
+
 ## 一键安装（推荐）
 
 仓库根目录的 `Install-Skill.ps1` 会按上表逐个安装：
@@ -23,40 +25,54 @@
 ```powershell
 cd "D:\deepseek harness gongzuoqu\keil5-automatic-wwj"
 
-# 先看看会装到哪里，不实际复制
+# 先看看会装到哪，不写任何文件
 pwsh -File .\Install-Skill.ps1 -DryRun
 
-# 全部平台
+# 默认只装 DSH
 pwsh -File .\Install-Skill.ps1
 
-# 只装某一个
-pwsh -File .\Install-Skill.ps1 -Target dsh
-pwsh -File .\Install-Skill.ps1 -Target doubao
-pwsh -File .\Install-Skill.ps1 -Target workbuddy
+# 多平台
+pwsh -File .\Install-Skill.ps1 -Target dsh,doubao,workbuddy
+
+# 全部五个位置
+pwsh -File .\Install-Skill.ps1 -Target all
 ```
 
-`-Target` 可选：`all`（默认）、`dsh`、`codex`、`doubao`、`doubao-user`、`workbuddy`，可多选。
+`-Target` 可选：`all`、`dsh`、`codex`、`doubao`、`doubao-user`、`workbuddy`，可多选。**默认 `dsh`**（只装 DSH，不替你决定要不要给别人装）。
 
-脚本行为：目标目录已存在同名技能时先删后拷（属于覆盖安装）；结束时打印每个平台的文件数并输出 JSON 汇总。
+其它动作：
+
+```powershell
+pwsh -File .\Install-Skill.ps1 -Action status                          # 看各平台装没装
+pwsh -File .\Install-Skill.ps1 -Action update -Target dsh              # 更新
+pwsh -File .\Install-Skill.ps1 -Action uninstall -Target dsh           # 卸载
+```
+
+### 安装脚本不会做什么
+
+| 情况 | 行为 |
+|---|---|
+| 目标目录已有**别的技能**（`name:` 不同） | **拒绝覆盖**，打印「为免覆盖别人的技能，本脚本不动它」 |
+| 覆盖本技能旧版本 | 先把整个旧目录备份到 `%TEMP%\keil5-automatic-wwj-backup\<时间戳>\<平台>_<时间戳>\`，并打印旧版本描述 |
+| 卸载 | 只删目标目录本身，父目录里别人的技能一律不碰；目标不是本技能时拒绝删除 |
+| 需要管理员权限 | 不需要，全程只写用户级目录 |
+| 改动系统配置 | 不改环境变量、不改注册表、不动 PATH |
+
+安装后脚本会回读目标 `SKILL.md` 的 `name:` 校验，校验不过会打印 `[警告]`。
 
 ## 手工安装
 
 任一平台都可以直接复制：
 
 ```powershell
-$src  = "D:\deepseek harness gongzuoqu\keil5-automatic-wwj\skill"
+$src = "D:\deepseek harness gongzuoqu\keil5-automatic-wwj\skill"
 
-# DSH
-Copy-Item -Recurse -Force $src "$env:USERPROFILE\.dsh\skills\keil5-automatic-wwj"
-
-# 豆包（工作电脑版）
-Copy-Item -Recurse -Force $src "$env:USERPROFILE\Doubao\skills\keil5-automatic-wwj"
-
-# WorkBuddy
-Copy-Item -Recurse -Force $src "$env:USERPROFILE\.workbuddy\skills\keil5-automatic-wwj"
+Copy-Item -LiteralPath $src -Destination "$env:USERPROFILE\.dsh\skills\keil5-automatic-wwj" -Recurse -Force
 ```
 
-目标目录的**父目录不存在时先建**（`New-Item -ItemType Directory -Force`）。装完检查目标目录里有 `SKILL.md`。
+目标目录的**父目录不存在时先建**（`New-Item -ItemType Directory -Force`）。装完检查目标目录里有 `SKILL.md`，且 frontmatter 的 `name:` 是 `keil5-automatic-wwj`。
+
+手工复制没有自动备份，要覆盖旧版请先自己拷一份。
 
 ## 各平台注意事项
 
@@ -65,6 +81,7 @@ Copy-Item -Recurse -Force $src "$env:USERPROFILE\.workbuddy\skills\keil5-automat
 - DSH 的技能管理器（Skills Manager）会扫描多个来源：`.dsh\skills`（原生，优先级最高）、`.agents\skills`、`.codex\skills`、`.claude\skills`、`.workbuddy\skills` 等。
 - **同名技能只会出现一个条目**，按来源优先级取第一个。所以装了 `.dsh\skills` 之后，`.codex\skills` 里那份不会再单独显示，但仍可被 Codex 使用。
 - 装好后不需要额外注册，新开对话即可用中文描述需求触发；也可以直接用 `$keil5-automatic-wwj` 点名调用。
+- `~/.dsh/skills-manager/state.json` 只需要相应 source 是打开的（默认都是开着的），技能放进去就会被扫描到。
 
 ### Codex
 
@@ -75,7 +92,7 @@ Copy-Item -Recurse -Force $src "$env:USERPROFILE\.workbuddy\skills\keil5-automat
 
 - 豆包客户端会把它登记的本地技能路径传给运行时。在作者机器上，日志里记录的值是 `local_skill_paths: ["C:\Users\yebocan\Doubao\skills"]`，所以装到 `%USERPROFILE%\Doubao\skills` 即可被识别。
 - 豆包内置的 `skill-creator-for-work` 另有官方约定目录 `workspace\.user_skills`（完整路径见上表）。本技能**两处都装**，哪条路径生效都不会落空。
-- 豆包侧只支持"技能（提示词 + 文件）"这一种形态。本技能的执行层是 PowerShell 脚本加一个 C# 命令行程序，**由豆包调用本地命令行执行**，不需要在豆包里额外配置 MCP 连接器。
+- 豆包侧只支持「技能（提示词 + 文件）」这一种形态。本技能的执行层是 PowerShell 脚本加一个 C# 命令行程序，**由豆包调用本地命令行执行**，不需要在豆包里额外配置 MCP 连接器。
 - 若豆包在沙箱里执行、拿不到本机路径，需要在其设置里允许访问本地文件系统，否则脚本读不到 `F:\Keil5\UV4\UV4.exe`。
 
 ### WorkBuddy
@@ -89,8 +106,9 @@ Copy-Item -Recurse -Force $src "$env:USERPROFILE\.workbuddy\skills\keil5-automat
 
 ```powershell
 $skill = "$env:USERPROFILE\.dsh\skills\keil5-automatic-wwj"
-Test-Path "$skill\SKILL.md"        # 应为 True
-(Get-ChildItem $skill -Recurse -File).Count   # 应为 20
+Test-Path "$skill\SKILL.md"                    # 应为 True
+(Get-ChildItem $skill -Recurse -File).Count    # 应为 26
+Get-ChildItem "$skill\scripts" -File | Measure-Object Name | Out-Null   # 应有 10 个脚本
 ```
 
 **第二步：跑自检（真正验证可用性）**
@@ -99,16 +117,26 @@ Test-Path "$skill\SKILL.md"        # 应为 True
 & "$skill\scripts\run-test.ps1" -Test all -OutputDirectory "$env:TEMP\keil5-tests"
 ```
 
-看到 `RESULT: PASS (20/20 checks passed)` 才算装好。这一步会真的启动 Keil、编译并调试，约 1-2 分钟。
+看到 `RESULT: PASS (26/26 checks passed)` 才算装好。这一步会真的启动 Keil、编译并调试，约 1-2 分钟。
 
-**只看到技能出现在列表里、或 Keil 窗口弹出来了，都不算装好。**
+**只看到技能出现在列表里、或 Keil 窗口弹出来了，都不算装好。** 技能出现在列表里只说明 Kirby 扫到了文件；Keil 窗口弹出来只说明进程起来了。唯一可信的证据是自检脚本逐项读回的真实数据（退出码、断点命中地址、变量值、寄存器快照、DEX 记录数）。
+
+自检可单独跑某一段：
+
+```powershell
+& "$skill\scripts\run-test.ps1" -Test build    # 只测编译层
+& "$skill\scripts\run-test.ps1" -Test debug    # 只测调试层
+```
+
+> 注意参数名是 `-Test`，不是 `-Routine`。
 
 ## 改了源码怎么同步
 
-仓库里的 `skill\` 是唯一源，各平台的副本是拷贝。改完源码后重新跑一次：
+仓库里的 `skill\` 是唯一源，各平台的副本是拷贝。改完源码后：
 
 ```powershell
-pwsh -File .\Install-Skill.ps1
+cd "D:\deepseek harness gongzuoqu\keil5-automatic-wwj"
+pwsh -File .\Install-Skill.ps1 -Action update -Target dsh
 ```
 
 只改了文档（`SKILL.md`、`references\`）也要重跑，否则客户端读到的还是旧副本。
@@ -128,9 +156,18 @@ $skill = "D:\deepseek harness gongzuoqu\keil5-automatic-wwj\skill"
 | 项 | 要求 |
 |---|---|
 | 操作系统 | Windows（脚本用 PowerShell，客户端是 .NET Framework 程序） |
+| 可执行环境 | Windows PowerShell 5.1 或 PowerShell 7+（`pwsh`）。脚本不使用 7 专有语法，5.1 与 7.6.6 都测过 |
 | Keil MDK | 已安装。本项目在 MDK V5.35 上验证；其他版本若 UVSOCK 版本号不同，协议报文格式一致 |
-| .NET Framework | 4.x（Windows 10/11 自带，无需单独安装） |
+| .NET Framework | 4.x（Windows 10/11 自带，无需单独安装），仅用于编译/运行 C# 客户端 |
 | Python | **不需要** |
 | 调试探针 | 可选。没有探针就用软件仿真 |
 
-`UV4.exe` 不在常见位置时，用脚本的 `-Uv4` 参数指定实际路径，或设 `KEIL_UV4` 环境变量。
+`UV4.exe` 不在常见位置时，优先跑一次配置脚本（写 `%APPDATA%\keil5-automatic-wwj\config.json`，以后所有脚本自动生效）：
+
+```powershell
+$s = "$env:USERPROFILE\.dsh\skills\keil5-automatic-wwj\scripts\Set-KeilPath.ps1"
+& $s -Uv4 "F:\Keil5\UV4\UV4.exe"
+& $s -Show
+```
+
+其它指定方式：`-Uv4` 参数、`KEIL5_UV4` 环境变量。**查找链是**：参数 → 环境变量 → 配置文件 → 常见安装位置 → PATH，不读注册表、不扫全盘。
