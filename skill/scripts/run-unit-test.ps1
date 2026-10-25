@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$WorkDirectory = (Join-Path ([IO.Path]::GetTempPath()) 'keil5-unit-tests')
 )

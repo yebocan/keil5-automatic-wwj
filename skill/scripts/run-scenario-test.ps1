@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     # 输出目录，默认 %TEMP%\keil5-scenarios
     [string]$WorkDirectory = (Join-Path ([IO.Path]::GetTempPath()) 'keil5-scenarios'),

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet('all', 'build', 'debug')]
     [string]$Test = 'all',
@@ -249,7 +249,8 @@ if ($Test -in @('all', 'debug')) {
 
         # 7) 断点枚举
         $bps = & $client $actualPort @('bp-enum')
-        Add-Check 'debug.bpEnum' ($bps.result.count -ge 1) ("breakpoints=" + $bps.result.count)
+        $bpCount = @($bps.result.breakpoints).Count
+        Add-Check 'debug.bpEnum' ($bpCount -ge 1) ("breakpoints=" + $bpCount)
 
         # 8) 退出调试（目标必须已停止；运行中退出会返回 11 TARGET_EXECUTING）
         $stop = & $client $actualPort @('stop')

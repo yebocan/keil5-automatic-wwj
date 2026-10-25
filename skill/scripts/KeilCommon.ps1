@@ -1,4 +1,4 @@
-# =====================================================================
+﻿# =====================================================================
 # KeilCommon.ps1 — keil5-automatic-wwj 公共模块
 #
 # 被 Build-Project.ps1 / Start-Uvision.ps1 / run-test.ps1 点源引用，统一提供：
@@ -271,7 +271,9 @@ function Get-RegistryEntry {
     $path = Get-KeilOwnedRegistryPath
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     try {
-        $entries = @(Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json)
+        $parsed = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $entries = @()
+        foreach ($pe in $parsed) { $entries += $pe }
     }
     catch { return $null }
     foreach ($e in $entries) {
@@ -561,7 +563,8 @@ function Get-RegisteredOwnedUvision {
     $entries = @()
     try {
         $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
-        if ($raw) { $entries = @($raw | ConvertFrom-Json) }
+        if ($raw) { $parsed = $raw | ConvertFrom-Json; $entries = @()
+            foreach ($pe in $parsed) { $entries += $pe } }
     }
     catch { return @() }
 
@@ -623,7 +626,8 @@ function Remove-KeilDeadRegistryEntries {
     $entries = @()
     try {
         $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
-        if ($raw) { $entries = @($raw | ConvertFrom-Json) }
+        if ($raw) { $parsed = $raw | ConvertFrom-Json; $entries = @()
+            foreach ($pe in $parsed) { $entries += $pe } }
     }
     catch { return [pscustomobject]@{ path = $path; existed = $true; before = 0; removed = 0; kept = 0; parseError = $true } }
 
@@ -672,7 +676,9 @@ function Remove-KeilOwnedRegistryEntry {
     $path = Get-KeilOwnedRegistryPath
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
     try {
-        $entries = @(Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json)
+        $parsed = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $entries = @()
+        foreach ($pe in $parsed) { $entries += $pe }
         $kept = @($entries | Where-Object { $_.pid -ne $ProcessId })
         if ($kept.Count -eq 0) {
             Remove-Item -LiteralPath $path -Force
